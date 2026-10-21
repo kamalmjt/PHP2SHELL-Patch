@@ -1,0 +1,170 @@
+---
+# ==============================================================================
+# Ansible Playbook: Detect PHP2Shell Vulnerabilities (CVE-2026-109618 & CVE-2026-109619)
+#
+# Audits all PHP binaries across managed hosts:
+#   - PHP CLI binaries (/usr/bin/php*, /opt/plesk/php/*/bin/php, /opt/php-*/bin/php)
+#   - PHP-FPM binaries (/usr/sbin/php-fpm*, /opt/plesk/php/*/sbin/php-fpm, etc.)
+#   - Apache mod_php modules (libphp*.so)
+#
+# Flags:
+#   - Vulnerable versions below official patches: 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+
+#   - Legacy End-of-Life (EOL) versions: PHP 5.x, 7.x, 8.0, 8.1
+#   - Active exploitation vectors: session.upload_progress.enabled == ON
+#   - PHP 8.5 Use-After-Free vector: fatal_error_backtraces == ON
+#   - OOM parser corruption traps: post_max_size >= memory_limit (CVE-2026-109618)
+#
+# Author: Kamal Majaiti EL Majaiti
+# ==============================================================================
+
+- name: Audit hosts for PHP2Shell Vulnerabilities (CVE-2026-109618 & CVE-2026-109619)
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Set to true to fail the playbook if any vulnerable PHP version is detected
+    fail_on_vulnerable: false
+
+    # Save a JSON audit report on each remote host
+    save_remote_report: true
+    remote_report_path: "/var/log/php2shell-audit.json"
+
+    # Fetch audit reports back to the Ansible controller machine
+    fetch_local_report: false
+    local_report_dir: "./reports"
+
+  tasks:
+    - name: Verify python3 interpreter is available on target
+      ansible.builtin.command: python3 --version
+      register: python_check
+      changed_when: false
+      failed_when: python_check.rc != 0
+
+    - name: Copy audit script to managed node
+      ansible.builtin.copy:
+        src: audit_php2shell.py
+        dest: /tmp/audit_php2shell.py
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Execute PHP2Shell vulnerability audit
+      ansible.builtin.command: python3 /tmp/audit_php2shell.py --json
+      register: php_audit_raw
+      changed_when: false
+
+    - name: Parse audit JSON data
+      ansible.builtin.set_fact:
+        php_audit: "{{ php_audit_raw.stdout | from_json }}"
+
+    - name: Display host audit summary banner
+      ansible.builtin.debug:
+        msg:
+          - "================================================================================"
+          - " HOST AUDIT: {{ inventory_hostname }} ({{ php_audit.hostname }})"
+          - " STATUS: {{ 'VULNERABLE' if php_audit.is_vulnerable else 'SECURE / PATCHED' }}"
+          - " TOTAL BINARIES CHECKED: {{ php_audit.summary.total_binaries }}"
+          - " PATCHED BINARIES       : {{ php_audit.summary.patched }}"
+          - " VULNERABLE BINARIES    : {{ php_audit.summary.vulnerable }} ({{ php_audit.summary.vulnerable_eol }} EOL, {{ php_audit.summary.vulnerable_unpatched }} unpatched)"
+          - " UPLOAD PROGRESS ACTIVE : {{ php_audit.summary.upload_progress_active }}"
+          - " OOM RISK TRAIL         : {{ php_audit.summary.oom_risk_count }}"
+          - "================================================================================"
+
+    - name: Display detailed findings for each binary
+      ansible.builtin.debug:
+        msg: >-
+          [{{ item.status }}] {{ item.type | upper }} => {{ item.path }}
+          (Version: {{ item.version }})
+          {% if item.target_version %} | Requires: >={{ item.target_version }}{% endif %}
+          {% if item.upload_progress_enabled %} | ALERT: session.upload_progress.enabled is ON!{% endif %}
+          {% if item.fatal_error_backtraces %} | ALERT: fatal_error_backtraces is ON!{% endif %}
+          {% if item.oom_risk %} | ALERT: {{ item.oom_details }}{% endif %}
+      loop: "{{ php_audit.findings }}"
+      loop_control:
+        label: "{{ item.path }} ({{ item.version }})"
+      when: php_audit.findings | length > 0
+
+    - name: Display critical advisory if vulnerable versions are present
+      ansible.builtin.debug:
+        msg:
+          - ">>> CRITICAL SECURITY NOTICE FOR {{ inventory_hostname }} <<<"
+          - "Detected {{ php_audit.summary.vulnerable }} vulnerable PHP installation(s)."
+          - "Configuration stopgaps (such as php2shellfix.sh) must be applied immediately."
+          - "The definitive solution is upgrading packages to: 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+."
+          - "For EOL PHP (5.x, 7.x, 8.0, 8.1), no official patches exist; rely on pool locking & WAF."
+      when: php_audit.is_vulnerable
+
+    - name: Save JSON report on remote host
+      ansible.builtin.copy:
+        content: "{{ php_audit_raw.stdout }}"
+        dest: "{{ remote_report_path }}"
+        owner: root
+        group: root
+        mode: '0640'
+      when: save_remote_report
+
+    - name: Ensure local report directory exists on controller
+      ansible.builtin.file:
+        path: "{{ local_report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: false
+      when: fetch_local_report
+      run_once: true
+
+    - name: Fetch report to Ansible controller
+      ansible.builtin.fetch:
+        src: "{{ remote_report_path }}"
+        dest: "{{ local_report_dir }}/{{ inventory_hostname }}-php2shell-audit.json"
+        flat: true
+      when: fetch_local_report and save_remote_report
+
+    - name: Clean up temporary audit script on managed node
+      ansible.builtin.file:
+        path: /tmp/audit_php2shell.py
+        state: absent
+
+    - name: Fail task if vulnerable PHP was detected and fail_on_vulnerable is set
+      ansible.builtin.fail:
+        msg: "Vulnerable PHP installations found on {{ inventory_hostname }}. See audit details above."
+      when:
+        - fail_on_vulnerable | bool
+        - php_audit.is_vulnerable | bool
+
+# ==============================================================================
+# Final Aggregated Playbook Recap
+# ==============================================================================
+- name: PHP2Shell Vulnerability Fleet Recap
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Summarize fleet audit results
+      vars:
+        all_hosts: "{{ groups['all'] | default([]) }}"
+        vuln_hosts: >-
+          {{
+            all_hosts
+            | select('extract', hostvars, 'php_audit')
+            | select('defined')
+            | selectattr('php_audit.is_vulnerable', 'defined')
+            | selectattr('php_audit.is_vulnerable', 'equalto', true)
+            | list
+          }}
+      ansible.builtin.debug:
+        msg: |
+          ================================================================================
+                              PHP2SHELL FLEET AUDIT RECAP                                
+          ================================================================================
+           Total Hosts Audited : {{ all_hosts | length }}
+           Clean / Patched Hosts: {{ (all_hosts | length) - (vuln_hosts | length) }}
+           Vulnerable Hosts    : {{ vuln_hosts | length }}
+          {% if vuln_hosts | length > 0 %}
+           Vulnerable Host List: {{ vuln_hosts | join(', ') }}
+           Action Required: Run php2shellfix.sh on vulnerable nodes or upgrade packages.
+          {% else %}
+           All audited hosts are clean or patched.
+          {% endif %}
+          ================================================================================

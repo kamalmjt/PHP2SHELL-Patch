@@ -1,0 +1,87 @@
+---
+- name: Install and activate CrowdSec AppSec virtual patch
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    cscli_bin: /usr/bin/cscli
+    appsec_rule: crowdsecurity/vpatch-CVE-2026-109618
+
+  tasks:
+    - name: Verify cscli exists
+      ansible.builtin.stat:
+        path: "{{ cscli_bin }}"
+      register: cscli_stat
+
+    - name: Fail if cscli is not installed
+      ansible.builtin.assert:
+        that:
+          - cscli_stat.stat.exists
+        fail_msg: "CrowdSec CLI not found at {{ cscli_bin }}"
+
+    - name: Update CrowdSec Hub index
+      ansible.builtin.command:
+        argv:
+          - "{{ cscli_bin }}"
+          - hub
+          - update
+      register: hub_update
+      changed_when: >-
+        'Downloading' in hub_update.stdout or
+        'update for collection' in hub_update.stdout
+
+    - name: Display Hub update result
+      ansible.builtin.debug:
+        var: hub_update.stdout_lines
+
+    - name: Install and enable AppSec rule
+      ansible.builtin.command:
+        argv:
+          - "{{ cscli_bin }}"
+          - appsec-rules
+          - install
+          - "{{ appsec_rule }}"
+      register: rule_install
+      changed_when: >-
+        'download' in (rule_install.stdout | lower) or
+        'enable' in (rule_install.stdout | lower)
+
+    - name: Display rule installation result
+      ansible.builtin.debug:
+        var: rule_install.stdout_lines
+
+    - name: Reload CrowdSec to apply configuration
+      ansible.builtin.systemd:
+        name: crowdsec
+        state: reloaded
+
+    - name: Check CrowdSec service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - crowdsec
+      register: crowdsec_status
+      changed_when: false
+      retries: 5
+      delay: 2
+      until: crowdsec_status.stdout | trim == "active"
+
+    - name: Verify the AppSec rule is listed
+      ansible.builtin.command:
+        argv:
+          - "{{ cscli_bin }}"
+          - appsec-rules
+          - list
+      register: appsec_rules
+      changed_when: false
+      failed_when: appsec_rule not in appsec_rules.stdout
+
+    - name: Report successful installation
+      ansible.builtin.debug:
+        msg:
+          - "Rule installed and enabled: {{ appsec_rule }}"
+          - "CrowdSec service: {{ crowdsec_status.stdout | trim }}"
+          - "CrowdSec configuration reloaded."
+
