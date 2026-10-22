@@ -903,16 +903,20 @@ audit_binaries_and_versions() {
     declare -A seen_cli=()
     for b in "${cli_bins[@]}"; do
         [[ -f $b && -x $b ]] || continue
+        # Helper scripts matched by php*, not PHP interpreters
+        case ${b##*/} in php-config*|phpize*|phpabtpl*) continue ;; esac
         real=$(realpath -e -- "$b" 2>/dev/null) || continue
         [[ -n ${seen_cli[$real]:-} ]] && continue
         seen_cli[$real]=1
         if ! trusted_path "$real"; then continue; fi
 
-        ((total_bin+=1))
         ver=$(timeout 10 "$b" -r 'echo PHP_VERSION;' 2>/dev/null || true)
-        if [[ -z $ver ]]; then
-            ver=$(timeout 10 "$b" -v 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "Unknown")
+        if [[ ! $ver =~ ^[0-9]+\.[0-9]+ ]]; then
+            ver=$(timeout 10 "$b" -v 2>/dev/null | head -n 1 | grep -oE '^PHP [0-9]+\.[0-9]+\.[0-9]+' | cut -d' ' -f2 || true)
         fi
+        # Not a PHP interpreter (wrapper or helper script without a version): skip it
+        [[ -n $ver ]] || continue
+        ((total_bin+=1))
 
         build=$(get_build_date "$b")
         status=$(apply_build_date "$(check_version_status "$ver")" "$build")
