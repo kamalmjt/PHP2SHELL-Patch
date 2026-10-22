@@ -29,6 +29,11 @@ PATCH_TARGETS = {
     (8, 5): (8, 5, 12),
 }
 
+# Binaries built on or after this date include the backported fix, even on EOL
+# branches or below the official version thresholds (e.g. sury builds of 7.x).
+PATCH_BUILD_DATE = datetime(2026, 10, 21)
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
 def parse_semver(ver_str):
     """Extract (major, minor, patch) from version string."""
     m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", ver_str)
@@ -76,6 +81,27 @@ def evaluate_version(ver_tuple):
         return ("PATCHED", None, f"Future PHP version {major}.{minor}.{patch} includes core mitigations.")
 
     return ("UNKNOWN", None, "Unrecognized PHP version branch.")
+
+def get_build_date(path):
+    """Build date from '-v' output ("built: Oct 21 2026 14:29:22"), or None."""
+    try:
+        res = subprocess.run([path, "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, universal_newlines=True)
+        m = re.search(r"built:\s*([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{4})", res.stdout)
+        if m and m.group(1) in MONTHS:
+            return datetime(int(m.group(3)), MONTHS.index(m.group(1)) + 1, int(m.group(2)))
+    except Exception:
+        pass
+    return None
+
+def apply_build_date(status, target_ver, desc, build_date):
+    """Vulnerable-by-version binaries built on/after PATCH_BUILD_DATE carry the backported fix."""
+    if status in ("VULNERABLE_EOL", "VULNERABLE_UNPATCHED") and build_date and build_date >= PATCH_BUILD_DATE:
+        return (
+            "PATCHED",
+            target_ver,
+            f"Patched via backport: built {build_date:%Y-%m-%d} (>= {PATCH_BUILD_DATE:%Y-%m-%d})."
+        )
+    return (status, target_ver, desc)
 
 def parse_size_bytes(val):
     if not val or val == "-1":
@@ -201,11 +227,13 @@ def run_audit():
         if not ver_str:
             continue
         semver = parse_semver(ver_str)
-        status, target_ver, desc = evaluate_version(semver)
+        build_date = get_build_date(b)
+        status, target_ver, desc = apply_build_date(*evaluate_version(semver), build_date)
         item = {
             "type": "cli",
             "path": b,
             "version": ver_str,
+            "build_date": build_date.strftime("%Y-%m-%d") if build_date else None,
             "semver": list(semver) if semver else None,
             "status": status,
             "target_version": target_ver,
@@ -239,11 +267,13 @@ def run_audit():
         if not ver_str:
             continue
         semver = parse_semver(ver_str)
-        status, target_ver, desc = evaluate_version(semver)
+        build_date = get_build_date(b)
+        status, target_ver, desc = apply_build_date(*evaluate_version(semver), build_date)
         item = {
             "type": "fpm",
             "path": b,
             "version": ver_str,
+            "build_date": build_date.strftime("%Y-%m-%d") if build_date else None,
             "semver": list(semver) if semver else None,
             "status": status,
             "target_version": target_ver,
@@ -367,7 +397,10 @@ def print_human_report(res):
         else:
             badge = "[CHECK MANUAL]       "
 
-        print(f" {t} {badge} {p} ({v})")
+        if st == "PATCHED" and f.get("details", "").startswith("Patched via backport"):
+            badge = "[PATCHED - BACKPORT] "
+        built = f" built {f['build_date']}" if f.get("build_date") else ""
+        print(f" {t} {badge} {p} ({v}{built})")
         if f.get("upload_progress_enabled") is True:
             print("     ! session.upload_progress.enabled is ON (Immediate Attack Vector)")
         if f.get("fatal_error_backtraces") is True:

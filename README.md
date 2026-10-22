@@ -40,7 +40,7 @@ Comprehensive remediation and hardening toolkit for the PHP2Shell vulnerabilitie
 
 ### Features
 
-- **Binary & Version Audit (CLI, FPM, mod_php):** Detects every PHP installation and flags versions below `8.2.35`, `8.3.36`, `8.4.27`, or `8.5.12` as `[VULNERABLE]`, alerting when legacy EOL PHP is detected.
+- **Binary & Version Audit (CLI, FPM, mod_php):** Detects every PHP installation and flags versions below `8.2.35`, `8.3.36`, `8.4.27`, or `8.5.12` as `[VULNERABLE]`, alerting when legacy EOL PHP is detected. Binaries whose `php -v` reports `built:` on or after **Oct 21 2026** already include the backported fix (e.g. sury builds of PHP 7.x) and are reported as `[PATCHED - BACKPORT]`, regardless of version.
 - **Base `php.ini` Hardening:** Enforces `session.upload_progress.enabled = 0` across all `php.ini` files and backup/staging copies (`php.ini.vst.back`, `php.ini.ucf-dist`).
 - **PHP 8.5 Support:** Automatically enforces `fatal_error_backtraces = 0` on PHP 8.5 to block fatal error backtrace use-after-free vectors.
 - **Persistent Drop-ins:** Deploys `99-php2shell.ini` into all `conf.d` / `php.d` directories so distro package updates cannot silently revert the fix.
@@ -154,7 +154,7 @@ Kit integral de remediación y bastionado contra las vulnerabilidades PHP2Shell 
 
 ### Características
 
-- **Auditoría de versiones (CLI, FPM, mod_php):** Comprueba cada binario y marca como `[VULNERABLE]` todo lo que esté por debajo de `8.2.35`, `8.3.36`, `8.4.27` o `8.5.12`, advirtiendo de software legacy EOL.
+- **Auditoría de versiones (CLI, FPM, mod_php):** Comprueba cada binario y marca como `[VULNERABLE]` todo lo que esté por debajo de `8.2.35`, `8.3.36`, `8.4.27` o `8.5.12`, advirtiendo de software legacy EOL. Los binarios cuyo `php -v` indica `built:` del **21 de octubre de 2026** o posterior ya incluyen el parche backporteado (p. ej. builds de sury de PHP 7.x) y se marcan como `[PATCHED - BACKPORT]`, sea cual sea la versión.
 - **Aseguramiento de `php.ini`:** Fija `session.upload_progress.enabled = 0` en todos los `php.ini` y copias de seguridad/plantilla (`php.ini.vst.back`, `php.ini.ucf-dist`).
 - **Soporte para PHP 8.5:** En PHP 8.5, fija automáticamente `fatal_error_backtraces = 0` para bloquear el vector UAF de rastreo de errores fatales.
 - **Drop-ins persistentes:** Instala `99-php2shell.ini` en todos los directorios `conf.d` / `php.d` para evitar que una actualización de paquetes de la distribución vuelva a activar la directiva.

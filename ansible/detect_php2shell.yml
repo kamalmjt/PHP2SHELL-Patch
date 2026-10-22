@@ -10,9 +10,17 @@
 # Flags:
 #   - Vulnerable versions below official patches: 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+
 #   - Legacy End-of-Life (EOL) versions: PHP 5.x, 7.x, 8.0, 8.1
+#   - Exception: binaries built on/after 2026-10-21 carry the backported fix
+#     (any branch, e.g. sury 7.x builds) and are reported as PATCHED
 #   - Active exploitation vectors: session.upload_progress.enabled == ON
 #   - PHP 8.5 Use-After-Free vector: fatal_error_backtraces == ON
 #   - OOM parser corruption traps: post_max_size >= memory_limit (CVE-2026-109618)
+#
+# Outputs:
+#   - Live console stream with status per binary
+#   - Consolidated log file on controller: ./php2shell-audit-report.log
+#   - Target list of vulnerable servers: ./reports/vulnerable-hosts.txt
+#   - Per-host remote JSON audit logs: /var/log/php2shell-audit.json
 #
 # Author: Kamal Majaiti EL Majaiti
 # ==============================================================================
@@ -30,11 +38,16 @@
     save_remote_report: true
     remote_report_path: "/var/log/php2shell-audit.json"
 
-    # Fetch audit reports back to the Ansible controller machine
-    fetch_local_report: false
+    # Central reporting on Ansible controller (localhost)
     local_report_dir: "./reports"
+    local_log_file: "./reports/php2shell-audit-report.log"
+    local_vuln_hosts_file: "./reports/vulnerable-hosts.txt"
+    also_write_root_log: true
 
   tasks:
+    # --------------------------------------------------------------------------
+    # 1. Per-Host Discovery & Inspection
+    # --------------------------------------------------------------------------
     - name: Verify python3 interpreter is available on target
       ansible.builtin.command: python3 --version
       register: python_check
@@ -62,20 +75,20 @@
       ansible.builtin.debug:
         msg:
           - "================================================================================"
-          - " HOST AUDIT: {{ inventory_hostname }} ({{ php_audit.hostname }})"
-          - " STATUS: {{ 'VULNERABLE' if php_audit.is_vulnerable else 'SECURE / PATCHED' }}"
-          - " TOTAL BINARIES CHECKED: {{ php_audit.summary.total_binaries }}"
-          - " PATCHED BINARIES       : {{ php_audit.summary.patched }}"
-          - " VULNERABLE BINARIES    : {{ php_audit.summary.vulnerable }} ({{ php_audit.summary.vulnerable_eol }} EOL, {{ php_audit.summary.vulnerable_unpatched }} unpatched)"
-          - " UPLOAD PROGRESS ACTIVE : {{ php_audit.summary.upload_progress_active }}"
-          - " OOM RISK TRAIL         : {{ php_audit.summary.oom_risk_count }}"
+          - " HOST AUDIT: {{ inventory_hostname }} ({{ php_audit.hostname | default(inventory_hostname) }})"
+          - " STATUS: {{ 'VULNERABLE' if (php_audit.is_vulnerable | default(false)) else 'SECURE / PATCHED' }}"
+          - " TOTAL BINARIES CHECKED: {{ php_audit.summary.total_binaries | default(0) }}"
+          - " PATCHED BINARIES       : {{ php_audit.summary.patched | default(0) }}"
+          - " VULNERABLE BINARIES    : {{ php_audit.summary.vulnerable | default(0) }} ({{ php_audit.summary.vulnerable_eol | default(0) }} EOL, {{ php_audit.summary.vulnerable_unpatched | default(0) }} unpatched)"
+          - " UPLOAD PROGRESS ACTIVE : {{ php_audit.summary.upload_progress_active | default(0) }}"
+          - " OOM RISK TRAIL         : {{ php_audit.summary.oom_risk_count | default(0) }}"
           - "================================================================================"
 
     - name: Display detailed findings for each binary
       ansible.builtin.debug:
         msg: >-
           [{{ item.status | default('UNKNOWN') }}] {{ (item.type | default('bin')) | upper }} => {{ item.path | default('unknown') }}
-          (Version: {{ item.version | default('unknown') }})
+          (Version: {{ item.version | default('unknown') }}{% if item.build_date | default('') %}, built: {{ item.build_date }}{% endif %})
           {% if item.target_version | default('') %} | Requires: >={{ item.target_version }}{% endif %}
           {% if item.upload_progress_enabled | default(false) %} | ALERT: session.upload_progress.enabled is ON!{% endif %}
           {% if item.fatal_error_backtraces | default(false) %} | ALERT: fatal_error_backtraces is ON!{% endif %}
@@ -96,7 +109,7 @@
           - "Configuration stopgaps (such as php2shellfix.sh) must be applied immediately."
           - "The definitive solution is upgrading packages to: 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+."
           - "For EOL PHP (5.x, 7.x, 8.0, 8.1), no official patches exist; rely on pool locking & WAF."
-      when: php_audit.is_vulnerable
+      when: php_audit.is_vulnerable | default(false)
 
     - name: Save JSON report on remote host
       ansible.builtin.copy:
@@ -105,113 +118,65 @@
         owner: root
         group: root
         mode: '0640'
-      when: save_remote_report
-
-    - name: Ensure local report directory exists on controller
-      ansible.builtin.file:
-        path: "{{ local_report_dir }}"
-        state: directory
-        mode: '0755'
-      delegate_to: localhost
-      become: false
-      when: fetch_local_report
-      run_once: true
-
-    - name: Fetch report to Ansible controller
-      ansible.builtin.fetch:
-        src: "{{ remote_report_path }}"
-        dest: "{{ local_report_dir }}/{{ inventory_hostname }}-php2shell-audit.json"
-        flat: true
-      when: fetch_local_report and save_remote_report
+      when: save_remote_report | bool
 
     - name: Clean up temporary audit script on managed node
       ansible.builtin.file:
         path: /tmp/audit_php2shell.py
         state: absent
 
-    - name: Fail task if vulnerable PHP was detected and fail_on_vulnerable is set
-      ansible.builtin.fail:
-        msg: "Vulnerable PHP installations found on {{ inventory_hostname }}. See audit details above."
-      when:
-        - fail_on_vulnerable | bool
-        - php_audit.is_vulnerable | bool
-
-# ==============================================================================
-# Final Aggregated Playbook Recap & Central Log Report Generation
-# ==============================================================================
-- name: PHP2Shell Vulnerability Fleet Recap & Reporting
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  vars:
-    local_report_dir: "./reports"
-    local_log_file: "./reports/php2shell-audit-report.log"
-    local_vuln_hosts_file: "./reports/vulnerable-hosts.txt"
-    also_write_root_log: true
-
-  tasks:
-    - name: Categorize hosts by vulnerability status
-      vars:
-        audited_hosts: "{{ ansible_play_hosts_all | default(groups['all']) | default([]) }}"
-      ansible.builtin.set_fact:
-        fleet_audited_hosts: "{{ audited_hosts }}"
-        fleet_vuln_hosts: >-
-          {%- set vuln_list = [] -%}
-          {%- for h in audited_hosts -%}
-            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined and hostvars[h].php_audit.is_vulnerable | default(false) -%}
-              {%- set _ = vuln_list.append(h) -%}
-            {%- endif -%}
-          {%- endfor -%}
-          {{ vuln_list }}
-        fleet_clean_hosts: >-
-          {%- set clean_list = [] -%}
-          {%- for h in audited_hosts -%}
-            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined and not (hostvars[h].php_audit.is_vulnerable | default(false)) -%}
-              {%- set _ = clean_list.append(h) -%}
-            {%- endif -%}
-          {%- endfor -%}
-          {{ clean_list }}
-        fleet_unreach_hosts: >-
-          {%- set unreach_list = [] -%}
-          {%- for h in audited_hosts -%}
-            {%- if hostvars[h] is not defined or hostvars[h].php_audit is not defined -%}
-              {%- set _ = unreach_list.append(h) -%}
-            {%- endif -%}
-          {%- endfor -%}
-          {{ unreach_list }}
-
-    - name: Ensure local reports directory exists
+    # --------------------------------------------------------------------------
+    # 2. Consolidated Central Logging & Reporting on Ansible Controller
+    # --------------------------------------------------------------------------
+    - name: Ensure local reports directory exists on controller
       ansible.builtin.file:
         path: "{{ local_report_dir }}"
         state: directory
         mode: '0755'
+      delegate_to: localhost
+      become: false
+      run_once: true
 
-    - name: Generate consolidated human-readable audit log report
+    - name: Generate consolidated audit log on Ansible controller
+      vars:
+        target_hosts: "{{ ansible_play_hosts_all | default(groups['all']) | default([]) }}"
       ansible.builtin.copy:
         content: |
+          {%- set vuln_hosts = [] -%}
+          {%- set clean_hosts = [] -%}
+          {%- set unreach_hosts = [] -%}
+          {%- for h in target_hosts -%}
+            {%- if hostvars[h] is not defined or hostvars[h].php_audit is not defined -%}
+              {%- set _ = unreach_hosts.append(h) -%}
+            {%- elif hostvars[h].php_audit.is_vulnerable | default(false) -%}
+              {%- set _ = vuln_hosts.append(h) -%}
+            {%- else -%}
+              {%- set _ = clean_hosts.append(h) -%}
+            {%- endif -%}
+          {%- endfor -%}
           ================================================================================
                     PHP2SHELL FLEET AUDIT REPORT (CVE-2026-109618 & CVE-2026-109619)
           ================================================================================
-          Total Hosts Evaluated : {{ fleet_audited_hosts | length }}
-          Clean / Patched Hosts : {{ fleet_clean_hosts | length }}
-          Vulnerable Hosts      : {{ fleet_vuln_hosts | length }}
-          Unreachable / Failed  : {{ fleet_unreach_hosts | length }}
+          Total Hosts Evaluated : {{ target_hosts | length }}
+          Clean / Patched Hosts : {{ clean_hosts | length }}
+          Vulnerable Hosts      : {{ vuln_hosts | length }}
+          Unreachable / Failed  : {{ unreach_hosts | length }}
           ================================================================================
 
-          {%- if fleet_vuln_hosts | length > 0 %}
+          {%- if vuln_hosts | length > 0 %}
           --------------------------------------------------------------------------------
                                 VULNERABLE SERVERS & BINARIES
           --------------------------------------------------------------------------------
-          {% for h in fleet_vuln_hosts %}
+          {% for h in vuln_hosts %}
           [!] HOST: {{ h }}
-              Total Vulnerable Binaries: {{ hostvars[h].php_audit.summary.vulnerable | default(1) }}
+              Vulnerable Binaries ({{ hostvars[h].php_audit.summary.vulnerable | default(1) }}):
           {%- for f in hostvars[h].php_audit.findings | default([]) %}
             {%- if f.status in ['VULNERABLE_EOL', 'VULNERABLE_UNPATCHED'] %}
                 * [{{ f.status }}] {{ f.type | upper }} => {{ f.path }} (Version: {{ f.version }})
                   {%- if f.target_version | default('') %} | Target: >= {{ f.target_version }}{% endif %}
                   {%- if f.upload_progress_enabled | default(false) %} | ALERT: session.upload_progress.enabled is ON!{% endif %}
                   {%- if f.fatal_error_backtraces | default(false) %} | ALERT: fatal_error_backtraces is ON!{% endif %}
-                  {%- if f.oom_risk | default(false) %} | ALERT: {{ f.oom_details }}{% endif %}
+                  {%- if f.oom_risk | default(false) %} | ALERT: {{ f.oom_details | default('OOM risk') }}{% endif %}
             {%- endif %}
           {%- endfor %}
 
@@ -223,15 +188,15 @@
           --------------------------------------------------------------------------------
                                    CLEAN / PATCHED SERVERS
           --------------------------------------------------------------------------------
-          {% for h in fleet_clean_hosts %}
+          {% for h in clean_hosts %}
             [OK] {{ h }} (Binaries: {{ hostvars[h].php_audit.summary.total_binaries | default(0) }}, Patched: {{ hostvars[h].php_audit.summary.patched | default(0) }})
           {% endfor %}
 
-          {%- if fleet_unreach_hosts | length > 0 %}
+          {%- if unreach_hosts | length > 0 %}
           --------------------------------------------------------------------------------
                                    UNREACHABLE / FAILED SERVERS
           --------------------------------------------------------------------------------
-          {% for h in fleet_unreach_hosts %}
+          {% for h in unreach_hosts %}
             [UNREACHABLE / FAILED] {{ h }}
           {% endfor %}
           {% endif %}
@@ -248,42 +213,79 @@
           ================================================================================
         dest: "{{ local_log_file }}"
         mode: '0644'
+      delegate_to: localhost
+      become: false
+      run_once: true
 
-    - name: Also write report to current directory for immediate access
+    - name: Also copy report to playbook root directory for quick access
       ansible.builtin.copy:
-        content: "{{ lookup('file', local_log_file) }}"
+        src: "{{ local_log_file }}"
         dest: "./php2shell-audit-report.log"
         mode: '0644'
+      delegate_to: localhost
+      become: false
+      run_once: true
       when: also_write_root_log | bool
 
-    - name: Generate list of vulnerable hostnames (for targeting remediations)
+    - name: Generate vulnerable hosts inventory list on controller
+      vars:
+        target_hosts: "{{ ansible_play_hosts_all | default(groups['all']) | default([]) }}"
       ansible.builtin.copy:
         content: |
-          {% for h in fleet_vuln_hosts %}
+          {%- for h in target_hosts -%}
+            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined and hostvars[h].php_audit.is_vulnerable | default(false) %}
           {{ h }}
-          {% endfor %}
+            {%- endif -%}
+          {%- endfor %}
         dest: "{{ local_vuln_hosts_file }}"
         mode: '0644'
+      delegate_to: localhost
+      become: false
+      run_once: true
 
     - name: Display fleet recap banner on console
+      vars:
+        target_hosts: "{{ ansible_play_hosts_all | default(groups['all']) | default([]) }}"
       ansible.builtin.debug:
         msg: |
+          {%- set vuln_hosts = [] -%}
+          {%- set clean_hosts = [] -%}
+          {%- set unreach_hosts = [] -%}
+          {%- for h in target_hosts -%}
+            {%- if hostvars[h] is not defined or hostvars[h].php_audit is not defined -%}
+              {%- set _ = unreach_hosts.append(h) -%}
+            {%- elif hostvars[h].php_audit.is_vulnerable | default(false) -%}
+              {%- set _ = vuln_hosts.append(h) -%}
+            {%- else -%}
+              {%- set _ = clean_hosts.append(h) -%}
+            {%- endif -%}
+          {%- endfor -%}
           ================================================================================
                               PHP2SHELL FLEET AUDIT RECAP                                
           ================================================================================
-           Total Hosts Evaluated : {{ fleet_audited_hosts | length }}
-           Clean / Patched Hosts : {{ fleet_clean_hosts | length }}
-           Vulnerable Hosts      : {{ fleet_vuln_hosts | length }}
-           Unreachable / Failed  : {{ fleet_unreach_hosts | length }}
-          {%- if fleet_vuln_hosts | length > 0 %}
-           Vulnerable Host List  : {{ fleet_vuln_hosts | join(', ') }}
+           Total Hosts Evaluated : {{ target_hosts | length }}
+           Clean / Patched Hosts : {{ clean_hosts | length }}
+           Vulnerable Hosts      : {{ vuln_hosts | length }}
+           Unreachable / Failed  : {{ unreach_hosts | length }}
+          {%- if vuln_hosts | length > 0 %}
+           Vulnerable Host List  : {{ vuln_hosts | join(', ') }}
           {%- else %}
            All audited hosts are clean or patched.
           {%- endif %}
-          {%- if fleet_unreach_hosts | length > 0 %}
-           Unreachable Hosts     : {{ fleet_unreach_hosts | join(', ') }}
+          {%- if unreach_hosts | length > 0 %}
+           Unreachable Hosts     : {{ unreach_hosts | join(', ') }}
           {%- endif %}
           ================================================================================
            AUDIT REPORT SAVED TO : {{ local_log_file }} (and ./php2shell-audit-report.log)
            VULNERABLE HOSTS LIST : {{ local_vuln_hosts_file }}
           ================================================================================
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Fail task if vulnerable PHP was detected and fail_on_vulnerable is set
+      ansible.builtin.fail:
+        msg: "Vulnerable PHP installations found on {{ inventory_hostname }}. See audit details above."
+      when:
+        - fail_on_vulnerable | bool
+        - php_audit.is_vulnerable | default(false) | bool

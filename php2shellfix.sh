@@ -33,7 +33,10 @@
 #                                Compares versions against official security releases:
 #                                  PHP 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+
 #                                Flags legacy EOL versions (PHP 5.x, 7.x, 8.0, 8.1)
-#                                and unpatched branches as VULNERABLE.
+#                                and unpatched branches as VULNERABLE, unless the
+#                                binary was built on/after PATCH_BUILD_DATE (2026-10-21):
+#                                those builds carry the backported fix (e.g. sury
+#                                packages for 7.x) and are reported as PATCHED.
 #   2. php.ini (all versions) -> sets session.upload_progress.enabled = 0; adds it
 #                                when not active (if absent, PHP defaults to On).
 #                                Same for backup/staging copies (php.ini.vst.back,
@@ -74,6 +77,9 @@ DIRECTIVE='session.upload_progress.enabled'
 POOL_LINE='php_admin_flag[session.upload_progress.enabled] = off'
 DROPIN_NAME='99-php2shell.ini'
 MAX_REQUESTS_DEFAULT=500
+# Binaries built on or after this date (YYYYMMDD) include the backported fix, even
+# on EOL branches or below the official version thresholds.
+PATCH_BUILD_DATE=20261021
 
 # php.ini plus copies that are not loaded by PHP but may be restored/merged later
 # (VestaCP backups, ucf's pending package version). Add other names here if needed.
@@ -223,6 +229,31 @@ check_version_status() {
         return 0
     fi
     echo "UNPATCHED"
+}
+
+# --- Build date of a PHP binary from "-v" ("built: Oct 21 2026 ...") as YYYYMMDD; empty if unknown
+get_build_date() {
+    local b=$1 mon='' day='' year='' m
+    read -r mon day year < <(timeout 10 "$b" -v 2>/dev/null | head -n 1 \
+        | sed -nE 's/.*built: ([A-Z][a-z]{2}) +([0-9]{1,2}) +([0-9]{4}).*/\1 \2 \3/p') || true
+    [[ -n $year ]] || return 0
+    case $mon in
+        Jan) m=1 ;; Feb) m=2 ;; Mar) m=3 ;; Apr) m=4 ;; May) m=5 ;; Jun) m=6 ;;
+        Jul) m=7 ;; Aug) m=8 ;; Sep) m=9 ;; Oct) m=10 ;; Nov) m=11 ;; Dec) m=12 ;;
+        *) return 0 ;;
+    esac
+    printf '%04d%02d%02d\n' "$year" "$m" "$((10#$day))"
+}
+
+# --- Version-vulnerable binaries built on/after PATCH_BUILD_DATE carry the backported fix.
+# Args: status build_date
+apply_build_date() {
+    local status=$1 build=$2
+    if [[ $status != PATCHED && -n $build ]] && (( build >= PATCH_BUILD_DATE )); then
+        echo "BACKPORT"
+    else
+        echo "$status"
+    fi
 }
 
 get_target_version() {
@@ -854,6 +885,7 @@ audit_binaries_and_versions() {
     echo "================================================================================"
     echo " Official patched versions: 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+"
     echo " Legacy PHP (5.x, 7.x, 8.0, 8.1) are EOL: no official binary security patches."
+    echo " Binaries built on/after $PATCH_BUILD_DATE include the backported fix (any branch)."
     echo "================================================================================"
 
     local total_bin=0 total_vuln=0 total_legacy=0 total_patched=0
@@ -861,7 +893,7 @@ audit_binaries_and_versions() {
     # 1. PHP CLI Binaries
     echo
     echo "-- PHP CLI Binaries"
-    local cli_bins=() b real ver status target_ver
+    local cli_bins=() b real ver status target_ver build
     shopt -s nullglob
     cli_bins+=(/usr/bin/php* /usr/local/bin/php*)
     cli_bins+=(/opt/plesk/php/*/bin/php)
@@ -882,10 +914,15 @@ audit_binaries_and_versions() {
             ver=$(timeout 10 "$b" -v 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "Unknown")
         fi
 
-        status=$(check_version_status "$ver")
+        build=$(get_build_date "$b")
+        status=$(apply_build_date "$(check_version_status "$ver")" "$build")
         case $status in
             PATCHED)
                 printf '  %-40s %-12s [PATCHED]\n' "$b" "$ver"
+                ((total_patched+=1))
+                ;;
+            BACKPORT)
+                printf '  %-40s %-12s [PATCHED - BACKPORT] (built %s)\n' "$b" "$ver" "$build"
                 ((total_patched+=1))
                 ;;
             EOL)
@@ -927,13 +964,18 @@ audit_binaries_and_versions() {
             ver=$(timeout 10 "$b" -v 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "Unknown")
         fi
 
-        status=$(check_version_status "$ver")
+        build=$(get_build_date "$b")
+        status=$(apply_build_date "$(check_version_status "$ver")" "$build")
         ini=$(sed -n 's/^Loaded Configuration File => //p' <<<"$info" | head -n 1)
         val=$(sed -n 's/^session\.upload_progress\.enabled => \([^ ]*\) => .*/\1/p' <<<"$info" | head -n 1)
 
         case $status in
             PATCHED)
                 printf '  %-40s %-12s [PATCHED]\n' "$b" "$ver"
+                ((total_patched+=1))
+                ;;
+            BACKPORT)
+                printf '  %-40s %-12s [PATCHED - BACKPORT] (built %s)\n' "$b" "$ver" "$build"
                 ((total_patched+=1))
                 ;;
             EOL)
