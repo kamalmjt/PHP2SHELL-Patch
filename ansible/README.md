@@ -39,6 +39,16 @@ nano inventory.ini
 ansible-playbook -i inventory.ini detect_php2shell.yml
 ```
 
+### Informes y Logs Generados
+
+Al finalizar la ejecución, el playbook genera automáticamente en el nodo de control:
+1. **`php2shell-audit-report.log`** (y dentro de `./reports/`): Informe consolidado legible que detalla cada servidor vulnerable, sus binarios afectados, rutas, versiones, alertas de explotación activa y acciones recomendadas.
+2. **`./reports/vulnerable-hosts.txt`**: Lista en texto plano con los nombres de todos los servidores vulnerables (uno por línea). Esto permite lanzar acciones de remediación dirigidas de forma inmediata:
+   ```bash
+   # Remediación inmediata con php2shellfix.sh en todos los servidores vulnerables
+   ansible -i reports/vulnerable-hosts.txt all -m script -a "../php2shellfix.sh"
+   ```
+
 ### Opciones y variables adicionales
 
 Puedes pasar variables mediante `-e` para modificar el comportamiento:
@@ -47,7 +57,7 @@ Puedes pasar variables mediante `-e` para modificar el comportamiento:
 # Fallar el playbook si se encuentra algún host con versiones vulnerables (ideal para pipelines CI/CD)
 ansible-playbook -i inventory.ini detect_php2shell.yml -e "fail_on_vulnerable=true"
 
-# Descargar copias de los informes JSON al controlador local (en el directorio ./reports/)
+# Descargar copias de los informes JSON individuales de cada host al controlador (en ./reports/)
 ansible-playbook -i inventory.ini detect_php2shell.yml -e "fetch_local_report=true"
 
 # Auditar únicamente un grupo de servidores (p. ej. solo servidores Plesk)
@@ -58,11 +68,12 @@ ansible-playbook -i inventory.ini detect_php2shell.yml -l plesk_servers
 
 | Variable | Defecto | Descripción |
 |---|---|---|
+| `local_log_file` | `./reports/php2shell-audit-report.log` | Ruta del log consolidado con los binarios y servidores vulnerables. |
+| `local_vuln_hosts_file` | `./reports/vulnerable-hosts.txt` | Lista de hosts vulnerables para lanzar remediaciones. |
 | `fail_on_vulnerable` | `false` | Si es `true`, provoca el fallo de la tarea si se detectan binarios vulnerables. |
-| `save_remote_report` | `true` | Guarda un informe JSON completo en cada servidor gestionado. |
-| `remote_report_path` | `/var/log/php2shell-audit.json` | Ruta destino del informe JSON en el nodo remoto. |
-| `fetch_local_report` | `false` | Descarga el informe JSON de cada host al nodo de control de Ansible. |
-| `local_report_dir` | `./reports` | Directorio local donde se guardan los informes descargados. |
+| `save_remote_report` | `true` | Guarda un informe JSON completo en cada servidor gestionado (`/var/log/php2shell-audit.json`). |
+| `fetch_local_report` | `false` | Descarga los informes JSON individuales al controlador de Ansible. |
+| `local_report_dir` | `./reports` | Directorio local donde se guardan los informes. |
 
 ---
 

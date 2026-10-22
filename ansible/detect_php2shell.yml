@@ -137,46 +137,153 @@
         - php_audit.is_vulnerable | bool
 
 # ==============================================================================
-# Final Aggregated Playbook Recap
+# Final Aggregated Playbook Recap & Central Log Report Generation
 # ==============================================================================
-- name: PHP2Shell Vulnerability Fleet Recap
+- name: PHP2Shell Vulnerability Fleet Recap & Reporting
   hosts: localhost
   connection: local
   gather_facts: false
+  vars:
+    local_report_dir: "./reports"
+    local_log_file: "./reports/php2shell-audit-report.log"
+    local_vuln_hosts_file: "./reports/vulnerable-hosts.txt"
+    also_write_root_log: true
+
   tasks:
-    - name: Summarize fleet audit results
+    - name: Categorize hosts by vulnerability status
       vars:
         audited_hosts: "{{ ansible_play_hosts_all | default(groups['all']) | default([]) }}"
-      ansible.builtin.debug:
-        msg: |
+      ansible.builtin.set_fact:
+        fleet_audited_hosts: "{{ audited_hosts }}"
+        fleet_vuln_hosts: >-
           {%- set vuln_list = [] -%}
+          {%- for h in audited_hosts -%}
+            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined and hostvars[h].php_audit.is_vulnerable | default(false) -%}
+              {%- set _ = vuln_list.append(h) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ vuln_list }}
+        fleet_clean_hosts: >-
           {%- set clean_list = [] -%}
+          {%- for h in audited_hosts -%}
+            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined and not (hostvars[h].php_audit.is_vulnerable | default(false)) -%}
+              {%- set _ = clean_list.append(h) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ clean_list }}
+        fleet_unreach_hosts: >-
           {%- set unreach_list = [] -%}
           {%- for h in audited_hosts -%}
-            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined -%}
-              {%- if hostvars[h].php_audit.is_vulnerable | default(false) -%}
-                {%- set _ = vuln_list.append(h) -%}
-              {%- else -%}
-                {%- set _ = clean_list.append(h) -%}
-              {%- endif -%}
-            {%- else -%}
+            {%- if hostvars[h] is not defined or hostvars[h].php_audit is not defined -%}
               {%- set _ = unreach_list.append(h) -%}
             {%- endif -%}
           {%- endfor -%}
+          {{ unreach_list }}
+
+    - name: Ensure local reports directory exists
+      ansible.builtin.file:
+        path: "{{ local_report_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Generate consolidated human-readable audit log report
+      ansible.builtin.copy:
+        content: |
+          ================================================================================
+                    PHP2SHELL FLEET AUDIT REPORT (CVE-2026-109618 & CVE-2026-109619)
+          ================================================================================
+          Total Hosts Evaluated : {{ fleet_audited_hosts | length }}
+          Clean / Patched Hosts : {{ fleet_clean_hosts | length }}
+          Vulnerable Hosts      : {{ fleet_vuln_hosts | length }}
+          Unreachable / Failed  : {{ fleet_unreach_hosts | length }}
+          ================================================================================
+
+          {%- if fleet_vuln_hosts | length > 0 %}
+          --------------------------------------------------------------------------------
+                                VULNERABLE SERVERS & BINARIES
+          --------------------------------------------------------------------------------
+          {% for h in fleet_vuln_hosts %}
+          [!] HOST: {{ h }}
+              Total Vulnerable Binaries: {{ hostvars[h].php_audit.summary.vulnerable | default(1) }}
+          {%- for f in hostvars[h].php_audit.findings | default([]) %}
+            {%- if f.status in ['VULNERABLE_EOL', 'VULNERABLE_UNPATCHED'] %}
+                * [{{ f.status }}] {{ f.type | upper }} => {{ f.path }} (Version: {{ f.version }})
+                  {%- if f.target_version | default('') %} | Target: >= {{ f.target_version }}{% endif %}
+                  {%- if f.upload_progress_enabled | default(false) %} | ALERT: session.upload_progress.enabled is ON!{% endif %}
+                  {%- if f.fatal_error_backtraces | default(false) %} | ALERT: fatal_error_backtraces is ON!{% endif %}
+                  {%- if f.oom_risk | default(false) %} | ALERT: {{ f.oom_details }}{% endif %}
+            {%- endif %}
+          {%- endfor %}
+
+          {% endfor %}
+          {%- else %}
+          No vulnerable servers detected across the fleet.
+          {%- endif %}
+
+          --------------------------------------------------------------------------------
+                                   CLEAN / PATCHED SERVERS
+          --------------------------------------------------------------------------------
+          {% for h in fleet_clean_hosts %}
+            [OK] {{ h }} (Binaries: {{ hostvars[h].php_audit.summary.total_binaries | default(0) }}, Patched: {{ hostvars[h].php_audit.summary.patched | default(0) }})
+          {% endfor %}
+
+          {%- if fleet_unreach_hosts | length > 0 %}
+          --------------------------------------------------------------------------------
+                                   UNREACHABLE / FAILED SERVERS
+          --------------------------------------------------------------------------------
+          {% for h in fleet_unreach_hosts %}
+            [UNREACHABLE / FAILED] {{ h }}
+          {% endfor %}
+          {% endif %}
+
+          ================================================================================
+                                       RECOMMENDED ACTIONS
+          ================================================================================
+          1. For supported branches (PHP 8.2+):
+             Upgrade packages immediately to >= 8.2.35, >= 8.3.36, >= 8.4.27, >= 8.5.12.
+          2. For legacy EOL software (PHP 5.x, 7.x, 8.0, 8.1):
+             Run php2shellfix.sh on vulnerable servers to lock PHP-FPM pools with
+             php_admin_flag, set pm.max_requests = 500, deploy drop-ins, and restart services:
+               sudo ./php2shellfix.sh
+          ================================================================================
+        dest: "{{ local_log_file }}"
+        mode: '0644'
+
+    - name: Also write report to current directory for immediate access
+      ansible.builtin.copy:
+        content: "{{ lookup('file', local_log_file) }}"
+        dest: "./php2shell-audit-report.log"
+        mode: '0644'
+      when: also_write_root_log | bool
+
+    - name: Generate list of vulnerable hostnames (for targeting remediations)
+      ansible.builtin.copy:
+        content: |
+          {% for h in fleet_vuln_hosts %}
+          {{ h }}
+          {% endfor %}
+        dest: "{{ local_vuln_hosts_file }}"
+        mode: '0644'
+
+    - name: Display fleet recap banner on console
+      ansible.builtin.debug:
+        msg: |
           ================================================================================
                               PHP2SHELL FLEET AUDIT RECAP                                
           ================================================================================
-           Total Hosts in Play : {{ audited_hosts | length }}
-           Clean / Patched     : {{ clean_list | length }}
-           Vulnerable Hosts    : {{ vuln_list | length }}
-           Unreachable / Failed: {{ unreach_list | length }}
-          {%- if vuln_list | length > 0 %}
-           Vulnerable Host List: {{ vuln_list | join(', ') }}
-           Action Required: Run php2shellfix.sh on vulnerable nodes or upgrade packages.
+           Total Hosts Evaluated : {{ fleet_audited_hosts | length }}
+           Clean / Patched Hosts : {{ fleet_clean_hosts | length }}
+           Vulnerable Hosts      : {{ fleet_vuln_hosts | length }}
+           Unreachable / Failed  : {{ fleet_unreach_hosts | length }}
+          {%- if fleet_vuln_hosts | length > 0 %}
+           Vulnerable Host List  : {{ fleet_vuln_hosts | join(', ') }}
           {%- else %}
            All audited hosts are clean or patched.
           {%- endif %}
-          {%- if unreach_list | length > 0 %}
-           Unreachable Hosts   : {{ unreach_list | join(', ') }}
+          {%- if fleet_unreach_hosts | length > 0 %}
+           Unreachable Hosts     : {{ fleet_unreach_hosts | join(', ') }}
           {%- endif %}
+          ================================================================================
+           AUDIT REPORT SAVED TO : {{ local_log_file }} (and ./php2shell-audit-report.log)
+           VULNERABLE HOSTS LIST : {{ local_vuln_hosts_file }}
           ================================================================================
