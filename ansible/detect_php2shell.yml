@@ -74,16 +74,19 @@
     - name: Display detailed findings for each binary
       ansible.builtin.debug:
         msg: >-
-          [{{ item.status }}] {{ item.type | upper }} => {{ item.path }}
-          (Version: {{ item.version }})
-          {% if item.target_version %} | Requires: >={{ item.target_version }}{% endif %}
-          {% if item.upload_progress_enabled %} | ALERT: session.upload_progress.enabled is ON!{% endif %}
-          {% if item.fatal_error_backtraces %} | ALERT: fatal_error_backtraces is ON!{% endif %}
-          {% if item.oom_risk %} | ALERT: {{ item.oom_details }}{% endif %}
-      loop: "{{ php_audit.findings }}"
+          [{{ item.status | default('UNKNOWN') }}] {{ (item.type | default('bin')) | upper }} => {{ item.path | default('unknown') }}
+          (Version: {{ item.version | default('unknown') }})
+          {% if item.target_version | default('') %} | Requires: >={{ item.target_version }}{% endif %}
+          {% if item.upload_progress_enabled | default(false) %} | ALERT: session.upload_progress.enabled is ON!{% endif %}
+          {% if item.fatal_error_backtraces | default(false) %} | ALERT: fatal_error_backtraces is ON!{% endif %}
+          {% if item.oom_risk | default(false) %} | ALERT: {{ item.oom_details | default('OOM risk detected') }}{% endif %}
+      loop: "{{ php_audit.findings | default([]) }}"
       loop_control:
-        label: "{{ item.path }} ({{ item.version }})"
-      when: php_audit.findings | length > 0
+        label: "{{ item.path | default('bin') }} ({{ item.version | default('unknown') }})"
+      when:
+        - php_audit is defined
+        - php_audit.findings is defined
+        - php_audit.findings | length > 0
 
     - name: Display critical advisory if vulnerable versions are present
       ansible.builtin.debug:
@@ -143,28 +146,37 @@
   tasks:
     - name: Summarize fleet audit results
       vars:
-        all_hosts: "{{ groups['all'] | default([]) }}"
-        vuln_hosts: >-
-          {{
-            all_hosts
-            | select('extract', hostvars, 'php_audit')
-            | select('defined')
-            | selectattr('php_audit.is_vulnerable', 'defined')
-            | selectattr('php_audit.is_vulnerable', 'equalto', true)
-            | list
-          }}
+        audited_hosts: "{{ ansible_play_hosts_all | default(groups['all']) | default([]) }}"
       ansible.builtin.debug:
         msg: |
+          {%- set vuln_list = [] -%}
+          {%- set clean_list = [] -%}
+          {%- set unreach_list = [] -%}
+          {%- for h in audited_hosts -%}
+            {%- if hostvars[h] is defined and hostvars[h].php_audit is defined -%}
+              {%- if hostvars[h].php_audit.is_vulnerable | default(false) -%}
+                {%- set _ = vuln_list.append(h) -%}
+              {%- else -%}
+                {%- set _ = clean_list.append(h) -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set _ = unreach_list.append(h) -%}
+            {%- endif -%}
+          {%- endfor -%}
           ================================================================================
                               PHP2SHELL FLEET AUDIT RECAP                                
           ================================================================================
-           Total Hosts Audited : {{ all_hosts | length }}
-           Clean / Patched Hosts: {{ (all_hosts | length) - (vuln_hosts | length) }}
-           Vulnerable Hosts    : {{ vuln_hosts | length }}
-          {% if vuln_hosts | length > 0 %}
-           Vulnerable Host List: {{ vuln_hosts | join(', ') }}
+           Total Hosts in Play : {{ audited_hosts | length }}
+           Clean / Patched     : {{ clean_list | length }}
+           Vulnerable Hosts    : {{ vuln_list | length }}
+           Unreachable / Failed: {{ unreach_list | length }}
+          {%- if vuln_list | length > 0 %}
+           Vulnerable Host List: {{ vuln_list | join(', ') }}
            Action Required: Run php2shellfix.sh on vulnerable nodes or upgrade packages.
-          {% else %}
+          {%- else %}
            All audited hosts are clean or patched.
-          {% endif %}
+          {%- endif %}
+          {%- if unreach_list | length > 0 %}
+           Unreachable Hosts   : {{ unreach_list | join(', ') }}
+          {%- endif %}
           ================================================================================

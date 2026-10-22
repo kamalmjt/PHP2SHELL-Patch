@@ -215,6 +215,7 @@ def run_audit():
             "memory_limit": mem_lim,
             "post_max_size": post_max,
             "oom_risk": False,
+            "oom_details": "",
         }
         if mem_lim and post_max:
             mb = parse_size_bytes(mem_lim)
@@ -252,6 +253,7 @@ def run_audit():
             "memory_limit": mem_lim,
             "post_max_size": post_max,
             "oom_risk": False,
+            "oom_details": "",
         }
         if mem_lim and post_max:
             mb = parse_size_bytes(mem_lim)
@@ -291,7 +293,11 @@ def run_audit():
                 "target_version": target_ver,
                 "details": desc,
                 "upload_progress_enabled": None,
+                "fatal_error_backtraces": None,
+                "memory_limit": "",
+                "post_max_size": "",
                 "oom_risk": False,
+                "oom_details": "",
             })
         else:
             findings.append({
@@ -303,7 +309,11 @@ def run_audit():
                 "target_version": "8.2.35+",
                 "details": "Installed Apache PHP module; query package manager (dpkg -S / rpm -qf) for exact version.",
                 "upload_progress_enabled": None,
+                "fatal_error_backtraces": None,
+                "memory_limit": "",
+                "post_max_size": "",
                 "oom_risk": False,
+                "oom_details": "",
             })
 
     # Summary calculation
